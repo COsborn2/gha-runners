@@ -10,7 +10,8 @@ locals {
   runner_types = {
     "aws-linux-x64" = {
       # 2 vCPU / 8 GiB, the shape of GitHub's ubuntu-latest for private repos.
-      # Several families widen the spot pools EC2 Fleet can draw from.
+      # In order of preference (fastest first); later types are fallbacks
+      # for when a type has no capacity.
       instance_types = ["m7a.large", "m7i.large", "m6a.large", "m6i.large", "m5a.large", "m5.large"]
       max_count      = 10 # concurrent instances: a cost ceiling, not a reservation
       disk_size_gb   = 50
@@ -45,11 +46,14 @@ locals {
         runner_boot_time_in_minutes    = 10
         scale_down_schedule_expression = "cron(*/5 * * * ? *)"
 
-        instance_types                       = type.instance_types
-        instance_target_capacity_type        = "spot"
-        instance_allocation_strategy         = "price-capacity-optimized" # AWS's recommendation for spot: fewer interruptions
-        enable_on_demand_failover_for_errors = ["InsufficientInstanceCapacity"]
-        create_service_linked_role_spot      = false # created once in main.tf, not per type
+        # On-demand because the account's SCPs deny spot launches outright.
+        # Where spot is allowed, "spot" + "price-capacity-optimized" (and
+        # enable_on_demand_failover_for_errors = ["InsufficientInstanceCapacity"])
+        # costs roughly a third as much.
+        instance_types                  = type.instance_types
+        instance_target_capacity_type   = "on-demand"
+        instance_allocation_strategy    = "prioritized" # instance_types order; "lowest-price" would always pick the slowest
+        create_service_linked_role_spot = false         # created once in main.tf, not per type
 
         ami = {
           id_ssm_parameter_arn = data.aws_ssm_parameter.ubuntu_ami.arn

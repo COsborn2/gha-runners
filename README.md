@@ -2,7 +2,7 @@
 
 Self-hosted GitHub Actions runners on AWS for my private repositories, built on
 [terraform-aws-github-runner](https://github.com/github-aws-runners/terraform-aws-github-runner)
-(v8.1.0). A job asks for one with `runs-on: aws-linux-x64`, gets a fresh spot
+(v8.1.0). A job asks for one with `runs-on: aws-linux-x64`, gets a fresh EC2
 instance, runs on it, and the instance terminates.
 
 | Directory | What it is | Status |
@@ -19,7 +19,7 @@ job queued ─► GitHub App webhook ─► API Gateway ─► webhook lambda �
      dispatcher lambda: do the job's labels match a runner type? ◄───────┘
          │ yes: queue it for that type
          ▼
-     scale-up lambda launches a spot instance ─► user data installs tools,
+     scale-up lambda launches an instance ─► user data installs tools,
      the runner registers to the job's repo ─► runs one job ─► instance terminates
 ```
 
@@ -41,7 +41,11 @@ label jobs use.
 
 | Label | Instance | Disk | Max concurrent |
 | --- | --- | --- | --- |
-| `aws-linux-x64` | 2 vCPU / 8 GiB (m7a, m7i, m6a, m6i, m5a, m5 `.large`), spot with on-demand fallback | 50 GB gp3 | 10 |
+| `aws-linux-x64` | 2 vCPU / 8 GiB, on-demand: `m7a.large` first, then m7i, m6a, m6i, m5a, m5 `.large` if it has no capacity | 50 GB gp3 | 10 |
+
+The instances are on-demand because the account's SCPs deny spot launches.
+Where spot is allowed, switching a type to spot (see the comment in
+`runner-types.tf`) costs roughly a third as much.
 
 Every type runs Ubuntu 24.04, using Canonical's latest image at each launch.
 [`runners/templates/user-data.sh`](runners/templates/user-data.sh) adds the
@@ -196,8 +200,10 @@ fetches the lambdas for the new version.
 2. Did the job's labels match a runner type? CloudWatch Logs
    `/aws/lambda/gha-dispatch-to-runner`. A job matches a type only when every
    label in its `runs-on` is in that type's matcher.
-3. Did an instance launch? `/aws/lambda/gha-aws-linux-x64-scale-up`. Spot
-   capacity and quota errors show up here.
+3. Did an instance launch? `/aws/lambda/gha-aws-linux-x64-scale-up`.
+   Capacity, quota and permission errors show up here. EC2 Fleet reports an
+   error code for each instance type it tried, and an SCP denial names the
+   policy.
 4. Did the runner register? `/github-self-hosted-runners/gha-aws-linux-x64/user_data`
    and `.../runner-startup`, one log stream per instance.
 
@@ -205,7 +211,8 @@ To get a shell on a running instance: `aws ssm start-session --target <instance-
 
 **Cost.** Between jobs, only lambda invocations, CloudWatch Logs (kept 30
 days) and a small S3 bucket holding the runner binary: pennies a month. Each
-job pays for its spot instance's time, including the 2–4 minute boot.
+job pays for its instance's time, including the 2–4 minute boot: about
+$0.12/hour for `m7a.large` on-demand, so a cent or two per job.
 
 ## Prebuilt image (paused)
 
