@@ -7,6 +7,26 @@ data "aws_ssm_parameter" "ubuntu_ami" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 }
 
+# The module grants scale-up ssm:GetParameter on the AMI parameter by building
+# its ARN with this account's ID (arn:aws:ssm:<region>:<account>:parameter/...).
+# Canonical's parameter is public, and public parameter ARNs have no account
+# (arn:aws:ssm:<region>::parameter/...), so that grant never matches and every
+# launch fails with AccessDenied. This grants it on the real ARN.
+resource "aws_iam_role_policy" "scale_up_read_public_ami_parameter" {
+  for_each = local.runner_types
+
+  name = "read-public-ami-parameter"
+  role = module.runners.runners_map[each.key].role_scale_up.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ssm:GetParameter", "ssm:GetParameters"]
+      Resource = data.aws_ssm_parameter.ubuntu_ami.arn
+    }]
+  })
+}
+
 # Shared with the GitHub App (its webhook secret), which signs every delivery with it.
 resource "random_password" "webhook_secret" {
   length  = 40
