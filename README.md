@@ -43,23 +43,58 @@ the current or previous one.
 
 ## Setup
 
-Repository settings (Settings → Secrets and variables → Actions). The repo is
-public and so are its Actions logs, so the role ARN (it contains the AWS account
-ID) is a secret, masked in logs:
+### 1. AWS bootstrap (`terraform/`, applied by hand once)
+
+Creates the GitHub OIDC provider, the build role (trusted only from this repo's
+`main` branch; EC2 limited to the build region; SSM limited to the two AMI
+parameters), and an S3 bucket for Terraform state. It's plain AWS resources and
+doesn't use the runner module. Use credentials with admin rights, e.g. an
+IAM Identity Center profile:
+
+```bash
+aws sso login --profile <profile>
+export AWS_PROFILE=<profile>
+cd terraform
+terraform init
+terraform apply                 # if the account already has a GitHub OIDC provider:
+                                # terraform apply -var create_github_oidc_provider=false
+```
+
+Then move the state into the bucket it just created:
+
+```bash
+cat > backend.hcl <<EOF
+bucket       = "$(terraform output -raw state_bucket)"
+key          = "gha-runner-image/terraform.tfstate"
+region       = "$(terraform output -raw region)"
+use_lockfile = true
+EOF
+# uncomment `backend "s3" {}` in versions.tf, then:
+terraform init -migrate-state -backend-config=backend.hcl
+```
+
+`backend.hcl` is gitignored because the bucket name contains the account ID.
+
+### 2. Repository settings
+
+Settings → Secrets and variables → Actions, from the Terraform outputs. The repo
+is public and so are its Actions logs, so the role ARN (it contains the AWS
+account ID) is a secret, masked in logs:
 
 | Name | Kind | Value |
 | --- | --- | --- |
-| `AWS_ROLE_ARN` | secret | IAM role this workflow assumes via GitHub OIDC (contains the account ID) |
-| `AWS_REGION` | variable | region the runners run in, e.g. `us-west-2` |
-| `AMI_SSM_PARAMETER` | variable | e.g. `/gha-runner-image/ami-id` |
+| `AWS_ROLE_ARN` | secret | `terraform output -raw build_role_arn` |
+| `AWS_REGION` | variable | `terraform output -raw region` |
+| `AMI_SSM_PARAMETER` | variable | `terraform output -raw ami_parameter_name` |
 
 Also set Settings → Actions → General → "Require approval for all outside
 collaborators", so a stranger's pull request can't run workflows without you
 approving it. (Pull request runs get no secrets and no AWS access regardless.)
 
-The IAM role must trust only `repo:<owner>/gha-runner-image:ref:refs/heads/main`
-and allow Packer's EC2 actions plus `ssm:GetParameter`/`ssm:PutParameter` on the
-two parameters.
+### 3. First image
+
+Actions → Build Runner Image → Run workflow. The first successful run creates
+the AMI parameter; runners can't launch until it exists.
 
 ## Using it from the runner module
 

@@ -1,0 +1,6 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+# Backend settings name the state bucket, which carries the AWS account ID.
+backend.hcl
