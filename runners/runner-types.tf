@@ -13,8 +13,11 @@ locals {
       # In order of preference (fastest first); later types are fallbacks
       # for when a type has no capacity.
       instance_types = ["m7a.large", "m7i.large", "m6a.large", "m6i.large", "m5a.large", "m5.large"]
-      max_count      = 10 # concurrent instances: a cost ceiling, not a reservation
-      disk_size_gb   = 50
+      # Concurrent instances per repository (runners are repo-level, and
+      # scale-up counts them per repo): a cost ceiling, not a reservation.
+      # Fleet-wide, the account's EC2 vCPU quota is the hard ceiling.
+      max_count    = 10
+      disk_size_gb = 50
     }
   }
 
@@ -45,6 +48,17 @@ locals {
         # registered within this window, so leave headroom.
         runner_boot_time_in_minutes    = 10
         scale_down_schedule_expression = "cron(*/5 * * * ? *)"
+
+        # By default scale-up takes one queued job per invocation and runs one
+        # invocation at a time; jobs that arrive meanwhile go back on the queue
+        # for its 30-second visibility timeout, so a workflow's 8 parallel jobs
+        # took ~4 minutes just to launch. A short batching window lets one
+        # invocation launch a burst of jobs together, and a little concurrency
+        # keeps overlapping bursts from waiting. (More than 1 concurrent
+        # invocation can overshoot max_count by a runner or two in a race.)
+        lambda_event_source_mapping_batch_size                         = 10
+        lambda_event_source_mapping_maximum_batching_window_in_seconds = 5
+        scale_up_reserved_concurrent_executions                        = 3
 
         # On-demand because the account's SCPs deny spot launches outright.
         # Where spot is allowed, "spot" + "price-capacity-optimized" (and

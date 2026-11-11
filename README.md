@@ -39,7 +39,7 @@ job queued ─► GitHub App webhook ─► API Gateway ─► webhook lambda �
 Defined in [`runners/runner-types.tf`](runners/runner-types.tf); the name is the
 label jobs use.
 
-| Label | Instance | Disk | Max concurrent |
+| Label | Instance | Disk | Max concurrent, per repository |
 | --- | --- | --- | --- |
 | `aws-linux-x64` | 2 vCPU / 8 GiB, on-demand: `m7a.large` first, then m7i, m6a, m6i, m5a, m5 `.large` if it has no capacity | 50 GB gp3 | 10 |
 
