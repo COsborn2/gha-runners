@@ -12,7 +12,7 @@ at every launch.
 | --- | --- |
 | Ubuntu 24.04 (latest Canonical AMI at build time) | matches `ubuntu-latest` |
 | Docker CE + Buildx + Compose plugins | image builds, integration-test containers |
-| Bun at `~ubuntu/.bun/bin` (version from the source repo's `.bun-version`) | `oven-sh/setup-bun` skips its download when this binary matches |
+| Bun (latest release) at `~ubuntu/.bun/bin` | `oven-sh/setup-bun` skips its download when this binary matches the repo's `.bun-version`; repos pinned to another version download theirs (a few seconds) |
 | Node 26.x in `/opt/hostedtoolcache` | `actions/setup-node` with `node-version: '26'` finds it without a download |
 | `postgres:17-alpine`, `redis:7-alpine`, `caddy:2-alpine`, `moby/buildkit:buildx-stable-1` | pulled by jobs every run |
 | git, jq, curl, unzip, gh, AWS CLI, CloudWatch agent | workflow scripts, the module's log shipping |
@@ -26,8 +26,10 @@ failure stops the build before an AMI exists.
 `.github/workflows/build-image.yml`:
 
 - **Daily** it compares the promoted AMI's `Runner_Version` / `Bun_Version` tags with
-  the latest [actions/runner](https://github.com/actions/runner/releases) release and
-  the source repo's `.bun-version`, and builds only if either moved. GitHub stops
+  the latest [actions/runner](https://github.com/actions/runner/releases) and
+  [Bun](https://github.com/oven-sh/bun/releases) releases, and builds only if either
+  moved. A release must be at least 3 days old (`MIN_RELEASE_AGE_DAYS`) before it's
+  baked in, so a bad one has time to be pulled. GitHub stops
   sending jobs to a runner 30 days after a newer runner release, so this stays far
   inside that window.
 - **Weekly** (Monday) it rebuilds regardless, for OS security patches and fresh
@@ -42,16 +44,14 @@ the current or previous one.
 ## Setup
 
 Repository settings (Settings → Secrets and variables → Actions). The repo is
-public and so are its Actions logs, so anything identifying your AWS account or
-private repos is a secret (masked in logs), not a variable:
+public and so are its Actions logs, so the role ARN (it contains the AWS account
+ID) is a secret, masked in logs:
 
 | Name | Kind | Value |
 | --- | --- | --- |
 | `AWS_ROLE_ARN` | secret | IAM role this workflow assumes via GitHub OIDC (contains the account ID) |
-| `SOURCE_REPOS_TOKEN` | secret | fine-grained PAT, **Contents: read-only** on the `BUN_VERSION_REPO` repo only |
 | `AWS_REGION` | variable | region the runners run in, e.g. `us-west-2` |
 | `AMI_SSM_PARAMETER` | variable | e.g. `/gha-runner-image/ami-id` |
-| `BUN_VERSION_REPO` | secret | `owner/repo` whose `.bun-version` is baked in (a secret so a private repo's name stays out of logs) |
 
 Also set Settings → Actions → General → "Require approval for all outside
 collaborators", so a stranger's pull request can't run workflows without you
@@ -97,5 +97,5 @@ aws ssm put-parameter --name /gha-runner-image/ami-id --type String --data-type 
 ```bash
 cd image
 packer init .
-packer build -var region=us-west-2 -var runner_version=<x.y.z> -var bun_version=<from .bun-version> .
+packer build -var region=us-east-1 -var runner_version=<x.y.z> -var bun_version=<x.y.z> .
 ```

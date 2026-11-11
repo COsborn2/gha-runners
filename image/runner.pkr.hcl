@@ -3,7 +3,7 @@
 # install/start scripts in vendor/ are that release's, unchanged.
 #
 #   packer init .
-#   packer build -var region=us-west-2 -var runner_version=2.330.0 .
+#   packer build -var region=us-east-1 -var runner_version=<x.y.z> -var bun_version=<x.y.z> .
 
 packer {
   required_plugins {
@@ -25,9 +25,8 @@ variable "runner_version" {
 }
 
 variable "bun_version" {
-  description = "Bun to bake in. Match the repos' .bun-version so setup-bun skips its download."
+  description = "Bun to bake in, without the bun-v prefix (https://github.com/oven-sh/bun/releases)."
   type        = string
-  default     = "1.4.4"
 }
 
 variable "node_major" {

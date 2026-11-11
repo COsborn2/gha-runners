@@ -1,7 +1,8 @@
 name: Build Runner Image
 
 # Keeps the runner AMI current:
-#   - daily: rebuild only when actions/runner or the pinned Bun has moved on
+#   - daily: rebuild only when actions/runner or Bun has a new release
+#     (at least MIN_RELEASE_AGE_DAYS old)
 #   - weekly: rebuild regardless, for OS security patches and fresh base images
 #   - on changes to image/ (push to main) and on demand
 # A successful build is promoted by writing its AMI ID to an SSM parameter;
@@ -37,6 +38,7 @@ concurrency:
 env:
   PACKER_VERSION: 1.16.2
   KEEP_IMAGES: 3
+  MIN_RELEASE_AGE_DAYS: 3
 
 jobs:
   validate:
@@ -58,7 +60,7 @@ jobs:
         run: |
           packer init .
           packer fmt -check -diff .
-          packer validate -var region=us-east-1 -var runner_version=0.0.0 .
+          packer validate -var region=us-east-1 -var runner_version=0.0.0 -var bun_version=0.0.0 .
 
   build:
     name: Build and promote
@@ -74,21 +76,17 @@ jobs:
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       AMI_PARAMETER: ${{ vars.AMI_SSM_PARAMETER }}
-      BUN_VERSION_REPO: ${{ secrets.BUN_VERSION_REPO }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check configuration
         env:
           HAS_ROLE: ${{ secrets.AWS_ROLE_ARN != '' }}
-          HAS_SOURCE_TOKEN: ${{ secrets.SOURCE_REPOS_TOKEN != '' }}
         run: |
           missing=()
           [ -n "$AWS_REGION" ] || missing+=("variable AWS_REGION")
           [ "$HAS_ROLE" = "true" ] || missing+=("secret AWS_ROLE_ARN")
-          [ -n "$BUN_VERSION_REPO" ] || missing+=("secret BUN_VERSION_REPO")
           [ -n "$AMI_PARAMETER" ] || missing+=("variable AMI_SSM_PARAMETER")
-          [ "$HAS_SOURCE_TOKEN" = "true" ] || missing+=("secret SOURCE_REPOS_TOKEN")
           if [ ${#missing[@]} -gt 0 ]; then
             printf '::error::Missing repository setting: %s\n' "${missing[@]}"
             exit 1
@@ -105,16 +103,26 @@ jobs:
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_TOKEN: ${{ secrets.SOURCE_REPOS_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           SCHEDULE: ${{ github.event.schedule }}
           FORCE_INPUT: ${{ inputs.force }}
         run: |
           set -euo pipefail
 
-          runner_version="$(gh api repos/actions/runner/releases/latest --jq '.tag_name | ltrimstr("v")')"
-          bun_version="$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/${BUN_VERSION_REPO}/contents/.bun-version" --jq '.content' | base64 -d | tr -d '[:space:]')"
-          [ -n "$runner_version" ] && [ -n "$bun_version" ] || { echo "::error::could not resolve versions"; exit 1; }
+          # Newest stable release at least MIN_RELEASE_AGE_DAYS old, so a bad
+          # release has time to be pulled before it lands in the image.
+          cutoff="$(date -u -d "-${MIN_RELEASE_AGE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
+          latest_release() {
+            gh api "repos/$1/releases?per_page=30" | jq -r --arg cutoff "$cutoff" --arg prefix "$2" '
+              [.[] | select((.draft or .prerelease) | not) | select(.published_at <= $cutoff)]
+              | sort_by(.published_at) | last | .tag_name // "" | ltrimstr($prefix)'
+          }
+          runner_version="$(latest_release actions/runner v)"
+          bun_version="$(latest_release oven-sh/bun bun-v)"
+          if [ -z "$runner_version" ] || [ -z "$bun_version" ]; then
+            echo "::error::could not resolve the latest runner/bun releases"
+            exit 1
+          fi
 
           current_ami="$(aws ssm get-parameter --name "$AMI_PARAMETER" --query Parameter.Value --output text 2>/dev/null || true)"
           current_runner=""
