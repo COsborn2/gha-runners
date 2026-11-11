@@ -35,8 +35,12 @@ node_bin="$(find /opt/hostedtoolcache/node -maxdepth 4 -path "*/${NODE_MAJOR}.*/
 "$node_bin" --version
 
 echo "== system"
-[ -f /swapfile ] && grep -q '^/swapfile ' /etc/fstab || fail "/swapfile is missing or not in /etc/fstab"
-! systemctl is-enabled --quiet apt-daily.timer || fail "apt-daily.timer is still enabled"
+if [ ! -f /swapfile ] || ! grep -q '^/swapfile ' /etc/fstab; then
+  fail "/swapfile is missing or not in /etc/fstab"
+fi
+if systemctl is-enabled --quiet apt-daily.timer; then
+  fail "apt-daily.timer is still enabled"
+fi
 
 echo "== cli tools"
 for tool in git jq curl wget unzip zip xz gcc make gh aws; do
