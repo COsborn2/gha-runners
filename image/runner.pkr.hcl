@@ -3,7 +3,10 @@
 # install/start scripts in vendor/ are that release's, unchanged.
 #
 #   packer init .
-#   packer build -var region=us-east-1 -var runner_version=<x.y.z> -var bun_version=<x.y.z> .
+#   packer build -var region=us-east-2 -var runner_version=<x.y.z> -var bun_version=<x.y.z> .
+#
+# build-local.sh wraps this: it picks the versions, builds, and promotes the
+# result into the SSM parameter the runners read.
 
 packer {
   required_plugins {

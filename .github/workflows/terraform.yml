@@ -1,17 +1,20 @@
 name: Terraform
 
-# Format and validate only. Applies run by hand (see README): this stack
-# creates the role the build workflow uses, so CI never holds rights to it.
+# Format and validate only. Applies run by hand (see README): bootstrap/
+# creates the role the image build uses and runners/ holds the GitHub App's
+# private key, so CI never holds rights to either.
 
 on:
   push:
     branches: [main]
     paths:
-      - 'terraform/**'
+      - 'bootstrap/**'
+      - 'runners/**'
       - '.github/workflows/terraform.yml'
   pull_request:
     paths:
-      - 'terraform/**'
+      - 'bootstrap/**'
+      - 'runners/**'
       - '.github/workflows/terraform.yml'
 
 permissions:
@@ -19,12 +22,16 @@ permissions:
 
 jobs:
   validate:
-    name: Validate
+    name: Validate ${{ matrix.stack }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [bootstrap, runners]
     defaults:
       run:
-        working-directory: terraform
+        working-directory: ${{ matrix.stack }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

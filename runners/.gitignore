@@ -1,0 +1,10 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+# Backend settings name the state bucket, which carries the AWS account ID.
+backend.hcl
+# Holds the GitHub App ID and the path to its private key.
+terraform.tfvars
+# Downloaded by download-lambdas.sh.
+lambdas/

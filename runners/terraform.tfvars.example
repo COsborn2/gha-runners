@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+
+# The GitHub App's settings → General → App ID.
+github_app_id = "1234567"
+
+# The private key you generated on the same page. Keep it outside the repo.
+github_app_private_key_path = "~/.ssh/gha-runners.private-key.pem"
+
+# Set to false if the account already has the AWSServiceRoleForEC2Spot role
+# (`aws iam get-role --role-name AWSServiceRoleForEC2Spot` succeeds).
+# create_spot_service_linked_role = false

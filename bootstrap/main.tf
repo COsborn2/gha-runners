@@ -4,27 +4,31 @@ data "aws_partition" "current" {}
 locals {
   account_id         = data.aws_caller_identity.current.account_id
   partition          = data.aws_partition.current.partition
-  oidc_provider_arn  = var.create_github_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
+  oidc_provider_arn  = one(concat(aws_iam_openid_connect_provider.github[*].arn, data.aws_iam_openid_connect_provider.github[*].arn))
   state_bucket_name  = coalesce(var.state_bucket_name, "gha-terraform-state-${local.account_id}")
   ami_parameter_arns = [for name in [var.ami_parameter_name, "${var.ami_parameter_name}-previous"] : "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${name}"]
 }
 
 # --- GitHub Actions OIDC: lets workflows get short-lived AWS credentials -----
+# Only the image build (image/, paused) uses it, so it's created with the build
+# role, behind var.create_image_build_role. The runners never need it.
 
 resource "aws_iam_openid_connect_provider" "github" {
-  count          = var.create_github_oidc_provider ? 1 : 0
+  count          = var.create_image_build_role && var.create_github_oidc_provider ? 1 : 0
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
 }
 
 data "aws_iam_openid_connect_provider" "github" {
-  count = var.create_github_oidc_provider ? 0 : 1
+  count = var.create_image_build_role && !var.create_github_oidc_provider ? 1 : 0
   url   = "https://token.actions.githubusercontent.com"
 }
 
 # --- Build role: assumed by build-image.yml on this repo's main branch -------
 
 data "aws_iam_policy_document" "build_trust" {
+  count = var.create_image_build_role ? 1 : 0
+
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -50,13 +54,17 @@ data "aws_iam_policy_document" "build_trust" {
 }
 
 resource "aws_iam_role" "build" {
+  count = var.create_image_build_role ? 1 : 0
+
   name                 = "gha-runner-image-build"
   description          = "Builds and promotes the runner AMI from ${var.github_repository}"
-  assume_role_policy   = data.aws_iam_policy_document.build_trust.json
+  assume_role_policy   = data.aws_iam_policy_document.build_trust[0].json
   max_session_duration = 7200 # a build plus promotion fits comfortably
 }
 
 data "aws_iam_policy_document" "build" {
+  count = var.create_image_build_role ? 1 : 0
+
   # Packer's amazon-ebs builder (developer.hashicorp.com/packer/integrations/hashicorp/amazon#iam-task-or-instance-role)
   # plus the workflow's image cleanup. EC2 doesn't support resource-level
   # scoping for most of these, so they are fenced to the build region instead.
@@ -115,9 +123,11 @@ data "aws_iam_policy_document" "build" {
 }
 
 resource "aws_iam_role_policy" "build" {
+  count = var.create_image_build_role ? 1 : 0
+
   name   = "build-and-promote"
-  role   = aws_iam_role.build.id
-  policy = data.aws_iam_policy_document.build.json
+  role   = aws_iam_role.build[0].id
+  policy = data.aws_iam_policy_document.build[0].json
 }
 
 # --- Terraform state bucket (this stack's and the runner stack's) -----------

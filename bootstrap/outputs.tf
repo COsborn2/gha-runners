@@ -1,6 +1,6 @@
 output "build_role_arn" {
-  description = "Set as the AWS_ROLE_ARN repository secret."
-  value       = aws_iam_role.build.arn
+  description = "Set as the AWS_ROLE_ARN repository secret. Null unless create_image_build_role is set."
+  value       = one(aws_iam_role.build[*].arn)
 }
 
 output "ami_parameter_name" {
@@ -19,6 +19,6 @@ output "region" {
 }
 
 output "state_bucket" {
-  description = "Put in backend.hcl (and the runner stack's backend config)."
+  description = "Put in backend.hcl for both stacks (bootstrap/ and runners/)."
   value       = aws_s3_bucket.state.bucket
 }
