@@ -34,8 +34,12 @@ node_bin="$(find /opt/hostedtoolcache/node -maxdepth 4 -path "*/${NODE_MAJOR}.*/
 [ -f "$(dirname "$(dirname "$node_bin")").complete" ] || fail "Node tool cache entry is missing its .complete marker"
 "$node_bin" --version
 
+echo "== system"
+[ -f /swapfile ] && grep -q '^/swapfile ' /etc/fstab || fail "/swapfile is missing or not in /etc/fstab"
+! systemctl is-enabled --quiet apt-daily.timer || fail "apt-daily.timer is still enabled"
+
 echo "== cli tools"
-for tool in git jq curl unzip gh aws; do
+for tool in git jq curl wget unzip zip xz gcc make gh aws; do
   command -v "$tool" >/dev/null || fail "$tool is not installed"
 done
 gh --version | head -n 1

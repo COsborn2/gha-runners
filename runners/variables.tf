@@ -20,6 +20,18 @@ variable "github_app_private_key_path" {
   type        = string
 }
 
+variable "use_prebuilt_image" {
+  description = "Launch runners from the prebuilt image (image/, promoted into prebuilt_ami_parameter_name), which starts in under a minute. Set false to use Canonical's stock Ubuntu and install everything from user data at boot (~2 minutes), e.g. before the first image exists."
+  type        = bool
+  default     = true
+}
+
+variable "prebuilt_ami_parameter_name" {
+  description = "SSM parameter holding the prebuilt image's AMI ID; image/build-local.sh and build-image.yml write it."
+  type        = string
+  default     = "/gha-runner-image/ami-id"
+}
+
 variable "create_spot_service_linked_role" {
   description = "Create the account-wide AWSServiceRoleForEC2Spot role that spot launches need. Set false if the account already has it; the apply fails with \"has been taken\" otherwise."
   type        = bool

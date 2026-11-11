@@ -10,7 +10,21 @@ export DEBIAN_FRONTEND=noninteractive
 cloud-init status --wait >/dev/null
 
 apt-get -y update
-apt-get -y install ca-certificates curl gnupg lsb-release jq git unzip zip
+apt-get -y install ca-certificates curl gnupg lsb-release jq git unzip zip wget xz-utils build-essential
+
+# Runners are short-lived and rebuilt from a fresh image, which is where OS
+# updates come from: keep Ubuntu's background apt runs from taking the dpkg
+# lock or the CPU in the middle of a job.
+systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
+systemctl mask apt-daily.service apt-daily-upgrade.service
+
+# ubuntu-latest has a 4 GiB swap file; without one, an 8 GiB runner OOMs on
+# builds the hosted runner survives. fallocate writes no data blocks, so the
+# file adds almost nothing to the snapshot.
+fallocate -l 4G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
 # Docker CE with the Buildx and Compose plugins (docker/setup-buildx-action,
 # docker/build-push-action, and the integration test containers).

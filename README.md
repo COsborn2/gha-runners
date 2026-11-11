@@ -9,7 +9,7 @@ instance, runs on it, and the instance terminates.
 | --- | --- | --- |
 | `bootstrap/` | The Terraform state bucket; for the image, a GitHub OIDC provider and build role | applied by hand, once |
 | `runners/` | The runner fleet: webhook, lambdas, VPC, runner types | applied by hand |
-| `image/` | A prebuilt runner AMI so runners start faster | paused, [see below](#prebuilt-image-paused) |
+| `image/` | The prebuilt runner AMI the runners launch from | built by hand with `build-local.sh`, [see below](#prebuilt-image) |
 
 ## How it works
 
@@ -32,7 +32,7 @@ job queued ─► GitHub App webhook ─► API Gateway ─► webhook lambda �
   (~$33/month saved), and the runner security group allows no inbound traffic.
 - **Boot time is the trade-off**: a job waits roughly 2–4 minutes for its
   instance to boot and for user data to install Docker and the other tools. The
-  [prebuilt image](#prebuilt-image-paused) is the fix.
+  [prebuilt image](#prebuilt-image) is the fix.
 
 ## Runner types
 
@@ -82,7 +82,7 @@ default to `us-east-2`; set `region` in each if your account allows a
 different region.
 
 With `-var create_image_build_role=true` it also creates what the [prebuilt
-image](#prebuilt-image-paused) needs:
+image](#prebuilt-image) needs:
 
 - the GitHub OIDC provider;
 - the image build role, which only this repo's `main` branch can assume, with
@@ -214,16 +214,19 @@ days) and a small S3 bucket holding the runner binary: pennies a month. Each
 job pays for its instance's time, including the 2–4 minute boot: about
 $0.12/hour for `m7a.large` on-demand, so a cent or two per job.
 
-## Prebuilt image (paused)
+## Prebuilt image
 
 `image/` builds an AWS AMI with the runner and the tools jobs use already
-installed, so a runner doesn't download them when it starts. That removes most
-of the boot time. The image rebuilds itself on free GitHub-hosted minutes and is
-promoted through an SSM parameter, which runners can read at every launch. It
-isn't wired into `runners/` yet.
+installed, so a runner doesn't install them when it starts. The runners launch
+from it (`use_prebuilt_image = true` in `runners/`). The AMI ID is promoted
+through an SSM parameter (`/gha-runner-image/ami-id`) that runners read at
+every launch, so a new image takes effect without an apply.
 
-> `build-image.yml` runs on a daily schedule and fails until step 2 below is
-> done. To stop it while the image work is paused, run
+Building it by hand is the current process; automatic rebuilds need the OIDC
+role (see [Automatic rebuilds](#automatic-rebuilds)).
+
+> `build-image.yml` runs on a daily schedule and fails until automatic
+> rebuilds are set up. To stop it meanwhile, run
 > `gh workflow disable "Build Runner Image"`.
 
 ### What's in the image
@@ -235,13 +238,42 @@ isn't wired into `runners/` yet.
 | Bun (latest release) at `~ubuntu/.bun/bin` | `oven-sh/setup-bun` skips its download when this binary matches the repo's `.bun-version`; repos pinned to another version download theirs (a few seconds) |
 | Node 26.x in `/opt/hostedtoolcache` | `actions/setup-node` with `node-version: '26'` finds it without a download |
 | `postgres:17-alpine`, `redis:7-alpine`, `caddy:2-alpine`, `moby/buildkit:buildx-stable-1` | pulled by jobs every run |
-| git, jq, curl, unzip, gh, AWS CLI, CloudWatch agent | workflow scripts, the module's log shipping |
+| git, jq, curl, wget, unzip, zip, xz, build-essential, gh, AWS CLI, CloudWatch agent | workflow scripts, native module builds, the module's log shipping |
+| A 4 GiB swap file | `ubuntu-latest` has one; without it an 8 GiB runner can run out of memory on builds |
+| Ubuntu's background apt runs turned off | they'd take the dpkg lock or the CPU mid-job; OS patches come from rebuilds instead |
 | actions/runner (latest release at build time) + the module's start script | registers the runner on boot |
 
 `image/smoke-test.sh` runs as the last Packer step and checks all of this; any
 failure stops the build before an AMI exists.
 
-### How it stays current
+### Building and promoting by hand
+
+```bash
+cd image
+AWS_PROFILE=runner-infra ./build-local.sh   # Git Bash on Windows
+```
+
+It does what the workflow does:
+
+1. Picks the newest actions/runner and Bun releases that are at least 3 days
+   old. Override either with `RUNNER_VERSION` / `BUN_VERSION`.
+2. Builds the image on an on-demand `t3.large` in the default VPC, about 20
+   minutes, mostly the final disk snapshot.
+3. Promotes it into the SSM parameter, keeping the outgoing image as
+   `<parameter>-previous`.
+4. Deletes all but the newest 3 images.
+
+Rebuild every week or two. Ubuntu security patches only arrive through
+rebuilds. A runner older than the latest actions/runner release updates itself
+when it starts, which works but adds time to every job until the next build.
+
+Storage costs little: images are EBS snapshots, which are billed for the data
+written (about 13 GB), not the 40 GB disk. That's roughly $0.66 a month per
+image, about $2 for the three kept.
+
+### Automatic rebuilds
+
+`.github/workflows/build-image.yml`:
 
 `.github/workflows/build-image.yml`:
 
@@ -261,12 +293,16 @@ After a build it writes the new AMI ID to the SSM parameter (the old one moves t
 `<parameter>-previous`) and deletes all but the newest 3 images, never touching
 the current or previous one.
 
-### Turning it on
+#### Turning it on
+
+It authenticates to AWS with GitHub OIDC, so it needs the OIDC provider and
+build role from `bootstrap/`. Project accounts on the Paid plan can't create
+OIDC providers, so turn this on after [activating advanced
+features](#if-you-activate-advanced-features).
 
 1. Apply `bootstrap/` with `-var create_image_build_role=true`, which creates
-   the OIDC provider and build role. The account's SCPs must allow creating
-   an OIDC provider. If you disabled the workflow, re-enable it:
-   `gh workflow enable "Build Runner Image"`.
+   the OIDC provider and build role. If you disabled the workflow, re-enable
+   it: `gh workflow enable "Build Runner Image"`.
 2. Add these under Settings → Secrets and variables → Actions, using the
    bootstrap stack's outputs. The repo is public and so are its Actions logs, so
    the role ARN, which contains the AWS account ID, is stored as a secret and
@@ -281,24 +317,49 @@ the current or previous one.
    Also set Settings → Actions → General → "Require approval for all outside
    collaborators", so a stranger's pull request can't run workflows until you
    approve it. (Pull request runs never get secrets or AWS access anyway.)
-3. Actions → Build Runner Image → Run workflow. The first successful run creates
-   the AMI parameter.
-4. Switch the runners to the image in `runners/runner-types.tf`: set
-   `ami.id_ssm_parameter_arn` to the bootstrap stack's `ami_parameter_arn`
-   output, and set `enable_userdata = false`, because the image already contains
-   the runner and its start script. Then apply.
+3. Actions → Build Runner Image → Run workflow, to check it end to end. It
+   promotes into the same parameter `build-local.sh` uses, so the runners need
+   no change.
 
 ### Rollback
+
+To the previous image:
 
 ```bash
 aws ssm put-parameter --name /gha-runner-image/ami-id --type String --data-type aws:ec2:image --overwrite \
   --value "$(aws ssm get-parameter --name /gha-runner-image/ami-id-previous --query Parameter.Value --output text)"
 ```
 
-### Building by hand
+Off the image entirely: set `use_prebuilt_image = false` in `runners/` and
+apply. Runners go back to Canonical's Ubuntu, with user data installing
+everything at boot.
 
-```bash
-cd image
-packer init .
-packer build -var region=us-east-2 -var runner_version=<x.y.z> -var bun_version=<x.y.z> .
-```
+## If you activate advanced features
+
+The Runner Infra account is an AWS "project" account. AWS-managed SCPs from
+the organization's management account limit it, and a few choices here only
+exist because of them. Activating advanced features (AWS Settings → Projects →
+Explore advanced features) gives you control of those SCPs. It can't be
+undone, and it removes spend limits. Afterwards:
+
+1. **Replace the spend limit first.** Add an AWS Budget with email alerts, a
+   budget action that denies compute when spending crosses the cap, and Cost
+   Anomaly Detection. Do this before the next step.
+2. **Remove the denies that matter here**, from the management account under
+   AWS Organizations → Policies → Service control policies. In the Paid-plan
+   policy:
+   - `DenySpotMarketType` / `DenyRequestSpotInstances` block spot.
+   - `DenyIAMRestrictedActions` (`iam:*Provider*`) blocks the OIDC provider.
+   - `DenyEC2Fleet` (`ec2:CreateFleet`) appears in the documented policy but
+     isn't enforced in this account today. The runners need `CreateFleet`, so
+     make sure no policy denies it.
+
+   The region rule (`RegionFloor`) can stay. Everything here runs in
+   us-east-2.
+3. **Switch the runners to spot** in `runners/runner-types.tf`: set
+   `instance_target_capacity_type = "spot"`, set `instance_allocation_strategy
+   = "price-capacity-optimized"`, and add `enable_on_demand_failover_for_errors
+   = ["InsufficientInstanceCapacity"]`. Then apply. That cuts instance cost to
+   roughly a third. The spot service-linked role already exists.
+4. **Turn on automatic image rebuilds** ([Turning it on](#turning-it-on)).
+   `build-local.sh` stays useful for one-off builds.

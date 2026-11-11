@@ -1,17 +1,29 @@
-# Latest Ubuntu 24.04 LTS image, as published by Canonical. Launch templates
-# resolve this parameter at every launch, so runners pick up Canonical's new
-# images without an apply. To switch to the prebuilt image from image/, point
-# the runner types at the bootstrap stack's `ami_parameter_arn` output instead
-# (and drop the user-data installs the image makes redundant).
+data "aws_caller_identity" "current" {}
+
+# Which image runners launch from. Both are SSM parameters that launch
+# templates resolve at every launch, so promoting a new image (or Canonical
+# publishing one) takes effect without an apply.
+# - The prebuilt image from image/: tools and the runner baked in, and it
+#   starts the runner itself, so no user data.
+# - Canonical's latest Ubuntu 24.04, with user data installing everything.
 data "aws_ssm_parameter" "ubuntu_ami" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+}
+
+locals {
+  ami_parameter_arn = (
+    var.use_prebuilt_image
+    ? "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${var.prebuilt_ami_parameter_name}"
+    : data.aws_ssm_parameter.ubuntu_ami.arn
+  )
 }
 
 # The module grants scale-up ssm:GetParameter on the AMI parameter by building
 # its ARN with this account's ID (arn:aws:ssm:<region>:<account>:parameter/...).
 # Canonical's parameter is public, and public parameter ARNs have no account
 # (arn:aws:ssm:<region>::parameter/...), so that grant never matches and every
-# launch fails with AccessDenied. This grants it on the real ARN.
+# launch fails with AccessDenied. This grants it on the real ARN (redundant,
+# but harmless, for the prebuilt image's parameter in this account).
 resource "aws_iam_role_policy" "scale_up_read_public_ami_parameter" {
   for_each = local.runner_types
 
@@ -22,7 +34,7 @@ resource "aws_iam_role_policy" "scale_up_read_public_ami_parameter" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["ssm:GetParameter", "ssm:GetParameters"]
-      Resource = data.aws_ssm_parameter.ubuntu_ami.arn
+      Resource = local.ami_parameter_arn
     }]
   })
 }
@@ -75,6 +87,12 @@ module "runners" {
   }
 
   multi_runner_config = local.multi_runner_config
+
+  # A scale-up run handles a whole batch of queued jobs (see runner-types.tf),
+  # about a second per job; 60 s leaves room for a full batch of 10. A run that
+  # times out is retried after the queue's visibility timeout, which the module
+  # sets to this same value.
+  runners_scale_up_lambda_timeout = 60
 
   logging_retention_in_days = 30
 }

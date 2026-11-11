@@ -69,9 +69,12 @@ locals {
         instance_allocation_strategy    = "prioritized" # instance_types order; "lowest-price" would always pick the slowest
         create_service_linked_role_spot = false         # created once in main.tf, not per type
 
+        # See main.tf: the prebuilt image starts the runner itself; stock
+        # Ubuntu needs the user data to install and start it.
         ami = {
-          id_ssm_parameter_arn = data.aws_ssm_parameter.ubuntu_ami.arn
+          id_ssm_parameter_arn = local.ami_parameter_arn
         }
+        enable_userdata   = !var.use_prebuilt_image
         userdata_template = "${path.module}/templates/user-data.sh"
         block_device_mappings = [{
           device_name = "/dev/sda1" # Ubuntu's root device; the module default (/dev/xvda) is Amazon Linux's
