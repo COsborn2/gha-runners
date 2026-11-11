@@ -7,6 +7,10 @@
 #
 # Rendered by Terraform's templatefile(): $${...} and %%{...} are template
 # syntax, so the shell code below uses plain $var and never $-brace forms.
+#
+# The module's snippets are inserted through replace(..., "\r", ""). Terraform
+# fetches the module with git, and Git for Windows' default core.autocrlf=true
+# checks its scripts out with CRLF line endings, which bash refuses to run.
 
 exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
@@ -25,7 +29,7 @@ while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
   sleep 5
 done
 
-${pre_install}
+${replace(pre_install, "\r", "")}
 
 export DEBIAN_FRONTEND=noninteractive
 deb_arch=$(dpkg --print-architecture) # amd64 / arm64
@@ -91,24 +95,24 @@ rm -f "$cw_deb"
 amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c "ssm:${ssm_key_cloudwatch_agent_config}"
 %{ endif }
 
-${install_runner}
+${replace(install_runner, "\r", "")}
 
-${post_install}
+${replace(post_install, "\r", "")}
 
 cd /opt/actions-runner
 
 %{ if hook_job_started != "" }
 cat > /opt/actions-runner/hook_job_started.sh <<'EOF'
-${hook_job_started}
+${replace(hook_job_started, "\r", "")}
 EOF
 echo ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/actions-runner/hook_job_started.sh | tee -a /opt/actions-runner/.env
 %{ endif }
 
 %{ if hook_job_completed != "" }
 cat > /opt/actions-runner/hook_job_completed.sh <<'EOF'
-${hook_job_completed}
+${replace(hook_job_completed, "\r", "")}
 EOF
 echo ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/actions-runner/hook_job_completed.sh | tee -a /opt/actions-runner/.env
 %{ endif }
 
-${start_runner}
+${replace(start_runner, "\r", "")}
