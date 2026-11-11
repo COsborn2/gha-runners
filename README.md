@@ -30,9 +30,21 @@ job queued ─► GitHub App webhook ─► API Gateway ─► webhook lambda �
 - **Near-zero idle cost**: between jobs only small lambdas run, every 5
   minutes. The VPC has public subnets only, so there's no NAT gateway
   (~$33/month saved), and the runner security group allows no inbound traffic.
-- **Boot time is the trade-off**: a job waits roughly 2–4 minutes for its
-  instance to boot and for user data to install Docker and the other tools. The
-  [prebuilt image](#prebuilt-image) is the fix.
+- **Start-up wait is the trade-off**: a job waits about 70–90 s for its
+  runner, where a GitHub-hosted job waits a few seconds. Measured on the
+  [prebuilt image](#prebuilt-image):
+
+  | Step | Time |
+  | --- | --- |
+  | GitHub delivers the job's webhook | 3–20 s, outside our control |
+  | Dispatch and launch | ~5 s; up to ~25 s for the last job of a burst |
+  | Instance boot until the runner starts | 40–50 s (84–92 s with user data) |
+  | Runner start until it picks up the job | ~13 s |
+
+  Jobs then run faster than on GitHub's runners: Lint, Build and Test took
+  20–40% less time. Every pipeline stage pays the wait again, though, so
+  short multi-stage pipelines still finish a little later than on hosted
+  runners.
 
 ## Runner types
 
