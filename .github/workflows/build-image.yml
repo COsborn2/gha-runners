@@ -1,0 +1,225 @@
+name: Build Runner Image
+
+# Keeps the runner AMI current:
+#   - daily: rebuild only when actions/runner or the pinned Bun has moved on
+#   - weekly: rebuild regardless, for OS security patches and fresh base images
+#   - on changes to image/ (push to main) and on demand
+# A successful build is promoted by writing its AMI ID to an SSM parameter;
+# terraform-aws-github-runner resolves that parameter at every instance launch.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily check
+    - cron: '41 7 * * 1' # weekly forced rebuild
+  push:
+    branches: [main]
+    paths:
+      - 'image/**'
+      - '.github/workflows/build-image.yml'
+  pull_request:
+    paths:
+      - 'image/**'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if nothing changed
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-image-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PACKER_VERSION: 1.16.2
+  KEEP_IMAGES: 3
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      - name: Lint shell scripts
+        run: shellcheck image/provision.sh image/smoke-test.sh
+
+      - name: Packer fmt and validate
+        working-directory: image
+        run: |
+          packer init .
+          packer fmt -check -diff .
+          packer validate -var region=us-east-1 -var runner_version=0.0.0 .
+
+  build:
+    name: Build and promote
+    # Pull requests (including from forks) never get AWS credentials: the IAM
+    # role only trusts this repo's main branch.
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AMI_PARAMETER: ${{ vars.AMI_SSM_PARAMETER }}
+      BUN_VERSION_REPO: ${{ secrets.BUN_VERSION_REPO }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check configuration
+        env:
+          HAS_ROLE: ${{ secrets.AWS_ROLE_ARN != '' }}
+          HAS_SOURCE_TOKEN: ${{ secrets.SOURCE_REPOS_TOKEN != '' }}
+        run: |
+          missing=()
+          [ -n "$AWS_REGION" ] || missing+=("variable AWS_REGION")
+          [ "$HAS_ROLE" = "true" ] || missing+=("secret AWS_ROLE_ARN")
+          [ -n "$BUN_VERSION_REPO" ] || missing+=("secret BUN_VERSION_REPO")
+          [ -n "$AMI_PARAMETER" ] || missing+=("variable AMI_SSM_PARAMETER")
+          [ "$HAS_SOURCE_TOKEN" = "true" ] || missing+=("secret SOURCE_REPOS_TOKEN")
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf '::error::Missing repository setting: %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          mask-aws-account-id: true
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-runner-image-${{ github.run_id }}
+
+      - name: Decide whether to build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TOKEN: ${{ secrets.SOURCE_REPOS_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          FORCE_INPUT: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          runner_version="$(gh api repos/actions/runner/releases/latest --jq '.tag_name | ltrimstr("v")')"
+          bun_version="$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/${BUN_VERSION_REPO}/contents/.bun-version" --jq '.content' | base64 -d | tr -d '[:space:]')"
+          [ -n "$runner_version" ] && [ -n "$bun_version" ] || { echo "::error::could not resolve versions"; exit 1; }
+
+          current_ami="$(aws ssm get-parameter --name "$AMI_PARAMETER" --query Parameter.Value --output text 2>/dev/null || true)"
+          current_runner=""
+          current_bun=""
+          if [ -n "$current_ami" ]; then
+            tags="$(aws ec2 describe-images --image-ids "$current_ami" --query 'Images[0].Tags' --output json 2>/dev/null || echo '[]')"
+            current_runner="$(jq -r '[.[]? | select(.Key == "Runner_Version") | .Value][0] // ""' <<<"$tags")"
+            current_bun="$(jq -r '[.[]? | select(.Key == "Bun_Version") | .Value][0] // ""' <<<"$tags")"
+          fi
+
+          reason=""
+          if [ "$EVENT_NAME" = "push" ]; then
+            reason="image definition changed"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$FORCE_INPUT" = "true" ]; then
+            reason="manual rebuild"
+          elif [ "$SCHEDULE" = "41 7 * * 1" ]; then
+            reason="weekly rebuild"
+          elif [ -z "$current_ami" ]; then
+            reason="no image promoted yet"
+          elif [ "$current_runner" != "$runner_version" ]; then
+            reason="actions/runner ${current_runner:-unknown} -> ${runner_version}"
+          elif [ "$current_bun" != "$bun_version" ]; then
+            reason="bun ${current_bun:-unknown} -> ${bun_version}"
+          fi
+
+          {
+            echo "runner_version=${runner_version}"
+            echo "bun_version=${bun_version}"
+            echo "current_ami=${current_ami}"
+            echo "build=$([ -n "$reason" ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Runner image"
+            echo ""
+            echo "- Current AMI: \`${current_ami:-none}\` (runner ${current_runner:-?}, bun ${current_bun:-?})"
+            echo "- Latest: runner ${runner_version}, bun ${bun_version}"
+            echo "- Decision: ${reason:-up to date, no build}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        if: ${{ steps.plan.outputs.build == 'true' }}
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      - name: Build image
+        id: packer
+        if: ${{ steps.plan.outputs.build == 'true' }}
+        working-directory: image
+        env:
+          RUNNER_VERSION: ${{ steps.plan.outputs.runner_version }}
+          BUN_VERSION: ${{ steps.plan.outputs.bun_version }}
+        run: |
+          set -euo pipefail
+          packer init .
+          packer build -color=false \
+            -var "region=${AWS_REGION}" \
+            -var "runner_version=${RUNNER_VERSION}" \
+            -var "bun_version=${BUN_VERSION}" \
+            -var "source_commit=${GITHUB_SHA}" \
+            .
+          ami="$(jq -r '.builds[-1].artifact_id | split(":")[1]' manifest.json)"
+          [[ "$ami" == ami-* ]] || { echo "::error::no AMI in packer manifest"; exit 1; }
+          echo "ami=${ami}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote image
+        if: ${{ steps.plan.outputs.build == 'true' }}
+        env:
+          NEW_AMI: ${{ steps.packer.outputs.ami }}
+          CURRENT_AMI: ${{ steps.plan.outputs.current_ami }}
+        run: |
+          set -euo pipefail
+          aws ec2 wait image-available --image-ids "$NEW_AMI"
+          # Keep the outgoing image addressable for a one-command rollback.
+          if [ -n "$CURRENT_AMI" ]; then
+            aws ssm put-parameter --name "${AMI_PARAMETER}-previous" --type String \
+              --data-type aws:ec2:image --value "$CURRENT_AMI" --overwrite >/dev/null
+          fi
+          aws ssm put-parameter --name "$AMI_PARAMETER" --type String \
+            --data-type aws:ec2:image --value "$NEW_AMI" --overwrite >/dev/null
+          {
+            echo ""
+            echo "- Promoted \`${NEW_AMI}\` (previous: \`${CURRENT_AMI:-none}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete old images
+        if: ${{ steps.plan.outputs.build == 'true' }}
+        env:
+          NEW_AMI: ${{ steps.packer.outputs.ami }}
+          CURRENT_AMI: ${{ steps.plan.outputs.current_ami }}
+        run: |
+          set -euo pipefail
+          images="$(aws ec2 describe-images --owners self \
+            --filters Name=tag:Name,Values=gha-runner-image Name=state,Values=available \
+            --query 'reverse(sort_by(Images, &CreationDate))[].{id: ImageId, snaps: BlockDeviceMappings[].Ebs.SnapshotId}' \
+            --output json)"
+          jq -c --argjson keep "$KEEP_IMAGES" '.[$keep:][]' <<<"$images" | while read -r image; do
+            id="$(jq -r .id <<<"$image")"
+            # Never delete what the runners (or a rollback) point at.
+            if [ "$id" = "$NEW_AMI" ] || [ "$id" = "$CURRENT_AMI" ]; then
+              continue
+            fi
+            echo "Deregistering $id"
+            aws ec2 deregister-image --image-id "$id"
+            jq -r '.snaps[]? // empty' <<<"$image" | while read -r snap; do
+              aws ec2 delete-snapshot --snapshot-id "$snap"
+            done
+          done
